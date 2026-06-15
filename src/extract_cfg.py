@@ -19,6 +19,10 @@ def extract_cfg_from_db(db_path, output_path=None):
         # Using ida_domain.Database as a context manager ensures proper cleanup
         # save_on_close=False avoids modifying the original .i64/.idb file
         with ida_domain.Database.open(db_path, save_on_close=False) as db:
+
+            entry_points = db.entries.get_all()
+            entry_addresses = {info.address for info in entry_points}
+
             cfg = {
                 "functions": {},
                 "edges": []
@@ -28,20 +32,36 @@ def extract_cfg_from_db(db_path, output_path=None):
 
             print("Extracting functions and intra-function edges...")
             functions_found = 0
+            entry_found = False
             for func in db.functions:
                 functions_found += 1
                 func_ea = func.start_ea
                 func_name = db.functions.get_name(func)
-                
-                # Use string representation of EA for JSON keys
-                cfg["functions"][str(func_ea)] = {
+                func_node_info = {
                     "name": func_name,
-                    "blocks": []
+                    "start_ea": func.start_ea,
+                    "end_ea": func.end_ea,
+                    "entry_point": func_ea in entry_addresses,
+                    "non_call_links": False,
+                    "blocks": [],
+                    "edges": []
                 }
+                # Use string representation of EA for JSON keys
+                cfg["functions"][str(func_ea)] = func_node_info
+                if func_node_info["entry_point"]:
+                    entry_found = True
+
 
                 # Get flowchart for the function
                 fc = db.functions.get_flowchart(func)
                 if not fc:
+                    # If no flowchart, still add the function start as a block 
+                    # so it's not missing from the graph nodes.
+                    cfg["functions"][str(func_ea)]["blocks"].append({
+                        "start": func.start_ea,
+                        "end": func.end_ea,
+                        "id": 0
+                    })
                     continue
                 
                 for block in fc:
@@ -56,7 +76,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                     is_cond = (num_succs > 1)
 
                     for succ in block.get_successors():
-                        cfg["edges"].append({
+                        cfg["functions"][str(func_ea)]["edges"].append({
                             "src": block.start_ea,
                             "dst": succ.start_ea,
                             "type": "intra-function",
@@ -64,7 +84,8 @@ def extract_cfg_from_db(db_path, output_path=None):
                         })
 
             print(f"Found {functions_found} functions.")
-
+            if not entry_found:
+                print("Warning: No entry points found among the functions. Check if the database is properly analyzed.")
             # Add inter-function edges (calls)
             print("Extracting inter-function calls...")
             for func in db.functions:
@@ -77,12 +98,24 @@ def extract_cfg_from_db(db_path, output_path=None):
                         continue
 
                     if xref.is_call:
+                        # Find the specific block that contains the call for more accurate CFG
+                        src_block_ea = source_chunk.start_ea
+                        source_fc = db.functions.get_flowchart(source_func)
+                        if source_fc:
+                            for b in source_fc:
+                                if b.start_ea <= source < b.end_ea:
+                                    src_block_ea = b.start_ea
+                                    break
+
                         cfg["edges"].append({
-                            "src": source_chunk.start_ea,
+                            "src": src_block_ea,
                             "dst": xref.to_ea,
                             "type": "inter-function",
                             "conditional": False
                         })
+                    else:
+                        cfg["functions"][str(func_ea)]["non_call_links"] = True
+
 
             # Save to file
             if output_path is None:

@@ -2,7 +2,26 @@
 import json
 import argparse
 import os
+import hashlib
 import networkx as nx
+from matplotlib import colormaps
+import matplotlib.colors as mcolors
+
+def get_function_color(func_name, func_colors=None):
+    """
+    Generates a color for a function name.
+    If func_colors mapping is provided, uses it for continuous coloring.
+    Otherwise falls back to deterministic MD5 hash.
+    """
+    if func_name == "unknown":
+        return "gray"
+    
+    if func_colors and func_name in func_colors:
+        return func_colors[func_name]
+    
+    # Fallback to MD5 to get a consistent hash for the function name
+    hash_object = hashlib.md5(func_name.encode())
+    return "#" + hash_object.hexdigest()[:6]
 
 def load_cfg(json_path):
     """
@@ -17,15 +36,33 @@ def load_cfg(json_path):
 
     G = nx.DiGraph()
 
+    # Pre-calculate continuous colors based on function addresses
+    sorted_func_eas = sorted(data['functions'].keys(), key=lambda x: int(x))
+    cmap = colormaps['turbo']
+    
+    func_colors = {}
+    num_funcs = len(sorted_func_eas)
+    for i, ea in enumerate(sorted_func_eas):
+        name = data['functions'][ea]['name']
+        if name not in func_colors:
+            val = i / max(1, num_funcs - 1)
+            func_colors[name] = mcolors.to_hex(cmap(val))
+
     # Add nodes (basic blocks)
-    for func_ea_str, func_data in data['functions'].items():
+    for func_ea_str in sorted(data['functions'].keys(), key=lambda x: int(x), reverse=True):
+        func_data = data['functions'][func_ea_str]
+        func_name = func_data['name']
+        node_color = get_function_color(func_name, func_colors)
         for block in func_data['blocks']:
-            block_label = f"{func_data['name']} @ {hex(block['start'])}"
+            block_label = f"{func_name} @ {hex(block['start'])}"
             G.add_node(
                 block['start'],
                 label=block_label,
-                func=func_data['name'],
-                color="skyblue"
+                func=func_name,
+                color=node_color,
+                entry_point=func_data['entry_point'],
+                non_call_links=func_data['non_call_links'],
+
             )
 
     # Add edges
@@ -34,10 +71,17 @@ def load_cfg(json_path):
         dst = edge['dst']
         
         # Ensure nodes exist
-        if src not in G:
-            G.add_node(src, label=hex(src), func="unknown", color="gray")
-        if dst not in G:
-            G.add_node(dst, label=hex(dst), func="unknown", color="gray")
+        for node_ea in [src, dst]:
+            if node_ea not in G:
+                node_ea_str = str(node_ea)
+                if node_ea_str in data['functions']:
+                    func_name = data['functions'][node_ea_str]['name']
+                    # Use the function name for label if it's a known function start
+                    label = f"{func_name} @ {hex(node_ea)}"
+                    color = get_function_color(func_name, func_colors)
+                    G.add_node(node_ea, label=label, func=func_name, color=color)
+                else:
+                    G.add_node(node_ea, label=hex(node_ea), func="unknown", color=get_function_color("unknown", func_colors))
             
         G.add_edge(src, dst, type=edge['type'], conditional=edge.get('conditional', False))
 
