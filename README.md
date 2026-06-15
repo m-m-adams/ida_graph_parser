@@ -2,6 +2,19 @@
 
 This project provides a set of scripts to extract and visualize a full program Control Flow Graph (CFG) from an IDA Pro database (.idb or .i64).
 
+
+## Dependencies
+
+- IDA Pro (9.0+ for standalone extraction) with IDAPYTHON support.
+- Python 3.14+
+- `idapro` (for standalone extraction)
+- `ipysigma`
+- `networkx`
+- `pandas`
+- `matplotlib`
+- `pydot` (optional, for DOT export)
+
+
 ## Project Structure
 
 - `src/extract_cfg.py`: IDA Python script to be run inside IDA Pro.
@@ -14,15 +27,6 @@ This project provides a set of scripts to extract and visualize a full program C
 
 ### 1. Extract CFG from IDA
 
-#### Option A: Inside IDA (GUI or Headless)
-Open your database in IDA Pro and run `src/extract_cfg.py`:
-- **GUI**: File -> Script file... -> Select `src/extract_cfg.py`
-- **Headless**:
-  ```bash
-  idat64 -A -Ssrc/extract_cfg.py your_database.i64
-  ```
-
-#### Option B: Standalone Python (Directly from Disk)
 If you have IDA Pro 9.0 or later and the `idapro` package installed, you can extract directly from a database file on disk without launching IDA:
 
 1. **Install the `idapro` library**:
@@ -50,23 +54,7 @@ This will generate a `your_database_cfg.json` file in the same directory.
 
 ### 2. Visualize CFG
 
-Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
 Run the visualization script:
 ```bash
 python3 -m src.visualize_cfg your_database_cfg.json
 ```
-
-## Dependencies
-
-- IDA Pro (9.0+ for standalone extraction) with IDAPYTHON support.
-- Python 3.14+
-- `idapro` (for standalone extraction)
-- `ipysigma`
-- `networkx`
-- `pandas`
-- `matplotlib`
-- `pydot` (optional, for DOT export)

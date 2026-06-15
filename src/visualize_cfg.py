@@ -86,7 +86,7 @@ def visualize_cfg(json_path):
 
     print(f"Graph loaded: {len(G.nodes)} nodes, {len(G.edges)} edges")
     print("ipysigma is designed for interactive environments (Jupyter).")
-    print("To visualize this graph, use the provided sample.ipynb.")
+    print("To visualize this graph, use the provided wip.ipynb.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize CFG exported from IDA")
