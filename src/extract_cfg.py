@@ -69,12 +69,15 @@ def extract_cfg_from_db(db_path, output_path=None):
                     "id": block.id
                 })
                 
-                # Successors
+                # In ida CFG, multiple successors imply a split in control flow (branch or switch).
+                num_succs = block.count_successors()
+                is_cond = num_succs > 1
                 for succ in block.succs():
                     cfg["edges"].append({
                         "src": block.start_ea,
                         "dst": succ.start_ea,
-                        "type": "intra-function"
+                        "type": "intra-function",
+                        "conditional": bool(is_cond)
                     })
         
         print(f"Found {functions_found} functions.")
@@ -88,7 +91,8 @@ def extract_cfg_from_db(db_path, output_path=None):
                         cfg["edges"].append({
                             "src": head,
                             "dst": xref.to,
-                            "type": "inter-function"
+                            "type": "inter-function",
+                            "conditional": bool(idc.is_cond_insn(head))
                         })
 
         # Save to file

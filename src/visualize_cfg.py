@@ -39,7 +39,7 @@ def load_cfg(json_path):
         if dst not in G:
             G.add_node(dst, label=hex(dst), func="unknown", color="gray")
             
-        G.add_edge(src, dst, type=edge['type'])
+        G.add_edge(src, dst, type=edge['type'], conditional=edge.get('conditional', False))
 
     return G
 
@@ -67,9 +67,19 @@ def collapse_chains(G):
                 
                 # Avoid creating self-loops if not desired, or handle them
                 if pred != node and succ != node:
-                    # Optional: transfer edge attributes if needed
-                    # Here we just create a simple edge
-                    collapsed_G.add_edge(pred, succ)
+                    # Transfer edge attributes and combine conditionality
+                    edge1_data = collapsed_G.get_edge_data(pred, node)
+                    edge2_data = collapsed_G.get_edge_data(node, succ)
+                    
+                    new_attrs = edge1_data.copy()
+                    new_attrs['conditional'] = edge1_data.get('conditional', False) or edge2_data.get('conditional', False)
+                    
+                    # If any part of the collapsed chain was an inter-function call, 
+                    # keep it marked as such.
+                    if edge2_data.get('type') == 'inter-function':
+                        new_attrs['type'] = 'inter-function'
+                        
+                    collapsed_G.add_edge(pred, succ, **new_attrs)
                     collapsed_G.remove_node(node)
                     changed = True
                     break # Restart to avoid issues with iterator after modification
