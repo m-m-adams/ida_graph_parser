@@ -7,6 +7,7 @@ import networkx as nx
 from matplotlib import colormaps
 import matplotlib.colors as mcolors
 
+
 def get_function_color(func_name, func_colors=None):
     """
     Generates a color for a function name.
@@ -15,15 +16,16 @@ def get_function_color(func_name, func_colors=None):
     """
     if func_name == "unknown":
         return "gray"
-    
+
     if func_colors and func_name in func_colors:
         return func_colors[func_name]
-    
+
     # Fallback to MD5 to get a consistent hash for the function name
     hash_object = hashlib.md5(func_name.encode())
     return "#" + hash_object.hexdigest()[:6]
 
-def load_cfg(json_path):
+
+def load_cfg(json_path) -> nx.DiGraph:
     """
     Loads CFG from JSON and returns a networkx DiGraph.
     """
@@ -39,7 +41,7 @@ def load_cfg(json_path):
     # Pre-calculate continuous colors based on function addresses
     sorted_func_eas = sorted(data['functions'].keys(), key=lambda x: int(x))
     cmap = colormaps['turbo']
-    
+
     func_colors = {}
     num_funcs = len(sorted_func_eas)
     for i, ea in enumerate(sorted_func_eas):
@@ -69,7 +71,7 @@ def load_cfg(json_path):
     for edge in data['edges']:
         src = edge['src']
         dst = edge['dst']
-        
+
         # Ensure nodes exist
         for node_ea in [src, dst]:
             if node_ea not in G:
@@ -81,11 +83,13 @@ def load_cfg(json_path):
                     color = get_function_color(func_name, func_colors)
                     G.add_node(node_ea, label=label, func=func_name, color=color)
                 else:
-                    G.add_node(node_ea, label=hex(node_ea), func="unknown", color=get_function_color("unknown", func_colors))
-            
+                    G.add_node(node_ea, label=hex(node_ea), func="unknown",
+                               color=get_function_color("unknown", func_colors))
+
         G.add_edge(src, dst, type=edge['type'], conditional=edge.get('conditional', False))
 
     return G
+
 
 def collapse_chains(G):
     """
@@ -94,44 +98,46 @@ def collapse_chains(G):
     """
     collapsed_G = G.copy()
     nodes_to_process = list(collapsed_G.nodes())
-    
+
     while True:
         changed = False
         for node in nodes_to_process:
             if node not in collapsed_G:
                 continue
-            
+
             # Check if node has exactly one predecessor and one successor
             if collapsed_G.in_degree(node) == 1 and collapsed_G.out_degree(node) == 1:
                 preds = list(collapsed_G.predecessors(node))
                 succs = list(collapsed_G.successors(node))
-                
+
                 pred = preds[0]
                 succ = succs[0]
-                
-                # Avoid creating self-loops if not desired, or handle them
-                if pred != node and succ != node:
+
+                # Avoid creating self-loops
+                if pred != node and succ != node and pred != succ:
                     # Transfer edge attributes and combine conditionality
                     edge1_data = collapsed_G.get_edge_data(pred, node)
                     edge2_data = collapsed_G.get_edge_data(node, succ)
-                    
+
                     new_attrs = edge1_data.copy()
-                    new_attrs['conditional'] = edge1_data.get('conditional', False) or edge2_data.get('conditional', False)
-                    
+                    new_attrs['conditional'] = edge1_data.get('conditional', False) or edge2_data.get('conditional',
+                                                                                                      False)
+
                     # If any part of the collapsed chain was an inter-function call, 
                     # keep it marked as such.
                     if edge2_data.get('type') == 'inter-function':
                         new_attrs['type'] = 'inter-function'
-                        
+
                     collapsed_G.add_edge(pred, succ, **new_attrs)
                     collapsed_G.remove_node(node)
                     changed = True
-                    break # Restart to avoid issues with iterator after modification
-        
+                    break  # Restart to avoid issues with iterator after modification
+
         if not changed:
             break
-            
+
     return collapsed_G
+
 
 def visualize_cfg(json_path):
     G = load_cfg(json_path)
@@ -142,9 +148,10 @@ def visualize_cfg(json_path):
     print("ipysigma is designed for interactive environments (Jupyter).")
     print("To visualize this graph, use the provided wip.ipynb.")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize CFG exported from IDA")
     parser.add_argument("json_file", help="Path to the exported CFG JSON file")
     args = parser.parse_args()
-    
+
     visualize_cfg(args.json_file)

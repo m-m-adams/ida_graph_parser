@@ -122,7 +122,8 @@ def extract_cfg_from_db(db_path, output_path=None):
                             "type": "non-call",
                             "conditional": False
                         })
-                        cfg["functions"][str(func_ea)]["non_call_links"] = True
+                        cfg["functions"][str(xref.to_ea)]["non_call_links"] = True
+                        cfg["functions"][str(src_block_ea)]["non_call_links"] = True
 
 
             # Save to file
