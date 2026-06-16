@@ -5,9 +5,11 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Any
 
+from ida_domain import Database
 from ida_domain.flowchart import FlowChartFlags
+from ida_ua import insn_t
 
 
 @dataclass
@@ -113,7 +115,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                         "end": hex(block.end_ea),
                         "id": block.id,
                         "instructions": [
-                             db.instructions.get_disassembly(insn)
+                            get_instr_info(db, insn)
                             for insn in instrs
                         ]
                     })
@@ -217,6 +219,26 @@ def extract_cfg_from_db(db_path, output_path=None):
         import traceback
         traceback.print_exc()
         return None
+
+
+def get_instr_info(db: Database, insn: insn_t) -> dict[str, str | None | bool | Any]:
+    xrefs = [x for x in db.xrefs.from_ea(insn.ea)]
+    call_target = None
+    disas = db.instructions.get_disassembly(insn)
+    if db.instructions.is_call_instruction(insn):
+        if len(xrefs) == 2:
+            call_target = xrefs[1].to_ea
+        elif db.instructions.get_operand(insn, 0).type == idaapi.o_reg:
+            call_target = "computed"
+            print(f"Computed call target for {hex(insn.ea)}: {disas}")
+
+    dic = {"addr": insn.ea,
+            "disasm": disas,
+            "call": db.instructions.is_call_instruction(insn),
+            "call_target": call_target,
+            }
+
+    return dic
 
 
 if __name__ == "__main__":

@@ -65,7 +65,8 @@ def load_cfg(json_path) -> nx.DiGraph:
                 entry_point=func_data['entry_point'],
                 non_call_links=func_data['non_call_links'],
                 id=block['id'],
-                assembly=block.get('instructions', [])
+                instrs=[instr['disasm'] for instr in block.get('instructions', [])],
+                detailed_info=block.get('instructions', [])
             )
 
     # Add edges
