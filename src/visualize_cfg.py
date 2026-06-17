@@ -4,6 +4,7 @@ import argparse
 import os
 import hashlib
 import networkx as nx
+from idadex import idaapi
 from matplotlib import colormaps
 import matplotlib.colors as mcolors
 
@@ -64,6 +65,7 @@ def load_cfg(json_path) -> nx.DiGraph:
                 color=node_color,
                 entry_point=func_data['entry_point'],
                 non_call_links=func_data['non_call_links'],
+                flags=func_data['flags'],
                 id=block['id'],
                 instrs=[instr['disasm'] for instr in block.get('instructions', [])],
                 detailed_info=block.get('instructions', [])
@@ -94,6 +96,21 @@ def load_cfg(json_path) -> nx.DiGraph:
             G.nodes[dst]['non_call_links'] = True
     return G
 
+def collapse_thunks(G: nx.DiGraph):
+    collapsed_G = G.copy()
+    nodes_to_process = list(collapsed_G.nodes())
+
+    for node in nodes_to_process:
+
+        flags = collapsed_G.nodes[node].get('flags', {})
+        if flags & idaapi.FUNC_THUNK:
+            preds = list(collapsed_G.predecessors(node))
+            succs = list(collapsed_G.successors(node))
+            if len(succs) == 1:
+                collapsed_G.remove_node(node)
+                for pred in preds:
+                    collapsed_G.add_edge(pred, succs[0])
+    return collapsed_G
 
 def collapse_chains(G):
     """
@@ -110,32 +127,32 @@ def collapse_chains(G):
                 continue
 
             # Check if node has exactly one predecessor and one successor
-            if collapsed_G.in_degree(node) == 1 and collapsed_G.out_degree(node) == 1:
+            if collapsed_G.out_degree(node) == 1:
                 preds = list(collapsed_G.predecessors(node))
                 succs = list(collapsed_G.successors(node))
+                if len(succs) == 1:
+                    succs_preds = list(collapsed_G.predecessors(succs[0]))
+                    if len(succs_preds) == 1:
+                        succ = succs[0]
+                        for pred in preds:
+                            if pred != node and succ != node and pred != succ:
+                                # Transfer edge attributes and combine conditionality
+                                edge1_data = collapsed_G.get_edge_data(pred, node)
+                                edge2_data = collapsed_G.get_edge_data(node, succ)
 
-                pred = preds[0]
-                succ = succs[0]
+                                new_attrs = edge1_data.copy()
+                                new_attrs['conditional'] = edge1_data.get('conditional', False) or edge2_data.get('conditional',
+                                                                                                                  False)
 
-                # Avoid creating self-loops
-                if pred != node and succ != node and pred != succ:
-                    # Transfer edge attributes and combine conditionality
-                    edge1_data = collapsed_G.get_edge_data(pred, node)
-                    edge2_data = collapsed_G.get_edge_data(node, succ)
+                                # If any part of the collapsed chain was an inter-function call,
+                                # keep it marked as such.
+                                if edge2_data.get('type') == 'inter-function':
+                                    new_attrs['type'] = 'inter-function'
 
-                    new_attrs = edge1_data.copy()
-                    new_attrs['conditional'] = edge1_data.get('conditional', False) or edge2_data.get('conditional',
-                                                                                                      False)
-
-                    # If any part of the collapsed chain was an inter-function call, 
-                    # keep it marked as such.
-                    if edge2_data.get('type') == 'inter-function':
-                        new_attrs['type'] = 'inter-function'
-
-                    collapsed_G.add_edge(pred, succ, **new_attrs)
-                    collapsed_G.remove_node(node)
-                    changed = True
-                    break  # Restart to avoid issues with iterator after modification
+                                collapsed_G.add_edge(pred, succ, **new_attrs)
+                                collapsed_G.remove_node(node)
+                                changed = True
+                                break  # Restart to avoid issues with iterator after modification
 
         if not changed:
             break

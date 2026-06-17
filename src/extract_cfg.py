@@ -17,6 +17,7 @@ class FuncNodeInfo:
     name: str
     start_ea: int
     end_ea: int
+    flags: int
     entry_point: bool = False
     imported: bool = False
     module: Optional[str] = None
@@ -34,6 +35,7 @@ class FuncNodeInfo:
             "module": self.module,
             "non_call_links": self.non_call_links,
             "blocks": self.blocks,
+            "flags": self.flags,
             "edges": self.edges,
         }
 
@@ -75,6 +77,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                     entry_point=False,
                     imported=True,
                     module=imp.module_name,
+                    flags=0,
                 ).to_dict()
             print(f"Found {len(import_addresses)} imported functions.")
 
@@ -85,11 +88,14 @@ def extract_cfg_from_db(db_path, output_path=None):
                 functions_found += 1
                 func_ea = func.start_ea
                 func_name = func.name
+                if func.flags & idaapi.FUNC_THUNK:
+                    print(f"Skipping thunk function {func_name} @ {hex(func_ea)}")
                 func_node_info = FuncNodeInfo(
                     name=func_name,
                     start_ea=func.start_ea,
                     end_ea=func.end_ea,
                     entry_point=func_ea in entry_addresses,
+                    flags=func.flags,
                 ).to_dict()
                 # Use string representation of EA for JSON keys
                 cfg["functions"][hex(func_ea)] = func_node_info
@@ -98,13 +104,15 @@ def extract_cfg_from_db(db_path, output_path=None):
 
                 # Get flowchart for the function
                 fc = db.functions.get_flowchart(func, flags=FlowChartFlags.NOEXT)
+
                 if not fc:
                     # If no flowchart, still add the function start as a block 
                     # so it's not missing from the graph nodes.
                     cfg["functions"][hex(func_ea)]["blocks"].append({
                         "start": hex(func.start_ea),
                         "end": hex(func.end_ea),
-                        "id": 0
+                        "id": 0,
+                        "flags": func.flags
                     })
                     continue
                 
@@ -114,6 +122,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                         "start": hex(block.start_ea),
                         "end": hex(block.end_ea),
                         "id": block.id,
+                        "flags": func.flags,
                         "instructions": [
                             get_instr_info(db, insn)
                             for insn in instrs
@@ -230,7 +239,6 @@ def get_instr_info(db: Database, insn: insn_t) -> dict[str, str | None | bool | 
             call_target = xrefs[1].to_ea
         elif db.instructions.get_operand(insn, 0).type == idaapi.o_reg:
             call_target = "computed"
-            print(f"Computed call target for {hex(insn.ea)}: {disas}")
 
     dic = {"addr": insn.ea,
             "disasm": disas,

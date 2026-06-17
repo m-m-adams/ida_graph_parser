@@ -12,4 +12,6 @@ dependencies = [
     "idapro>=0.0.9",
     "ipysigma",
     "pandas-stubs~=3.0.3",
+    "openai>=1.0.0",
+    "nest-asyncio>=1.5.0",
 ]
