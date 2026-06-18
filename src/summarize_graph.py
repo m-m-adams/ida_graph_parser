@@ -14,6 +14,7 @@ import json
 import os
 import asyncio
 import logging
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -31,7 +32,7 @@ FUNC_SYSTEM_PROMPT = (
     "You are a reverse-engineering assistant. "
     "You are given all basic blocks of a single function's aarch64 assembly, "
     "along with the control flow between them. "
-    "Summarize what this function does at a high level. Be concise. "
+    "Summarize what this function does. Be concise. "
     "Your audience is an expert reverse engineer. "
     "If a function follows standard ABI calling conventions don't reexplain them."
 )
@@ -43,7 +44,10 @@ FUNC_WITH_DEPS_SYSTEM_PROMPT = (
     "other functions that this function calls or jumps to. "
     "Summarize what this function does at a high level, incorporating "
     "what the called/referenced functions do. Be concise. "
-    "Your audience is an expert reverse engineer. "
+    "If a summary is not yet available for a called/referenced function, just note how that funtion is called or jumped to. "
+    "Focus on how inputs are used and transformed into outputs. "
+    "Your audience is an expert reverse engineer. You need to provide them"
+    " an accurate understanding of the function's behavior. "
     "If a function follows standard ABI calling conventions don't reexplain them."
 )
 
@@ -84,6 +88,7 @@ class GraphSummarizer:
         self._pbar: Optional[tqdm] = None
         # Build function groupings: func_name -> list of node_ids
         self._func_nodes: dict[str, list] = {}
+        self._needs_recheck: set[str] = set()
         for node_id, data in self.graph.nodes(data=True):
             func_name = data.get("func", str(node_id))
             self._func_nodes.setdefault(func_name, []).append(node_id)
@@ -156,8 +161,18 @@ class GraphSummarizer:
         # Check for inter-function dependencies
         deps = self._func_deps.get(func_name, set())
         deps_text = ""
+        needs_recheck = False
         for dep_func in deps:
-            dep_summary = self._summaries.get(dep_func, f"[recursive reference to {dep_func}]")
+            try:
+                dep_summary = self._summaries.get(dep_func)
+                if "[unsummarized reference to " in dep_summary:
+                    needs_recheck = True
+                    dep_summary = f"[dependency summary not yet available for {dep_func}]"
+                    self._needs_recheck.add(dep_func)
+            except KeyError:
+                needs_recheck = True
+                dep_summary = f"[dependency summary not available for {dep_func}]"
+                self._needs_recheck.add(dep_func)
             deps_text += f"\n--- Called function: {dep_func} ---\n{dep_summary}\n"
 
         if total_instrs == 0 and not deps_text:
@@ -180,7 +195,7 @@ class GraphSummarizer:
 
         self._summaries[func_name] = summary
         self._save_cache()
-        if self._pbar is not None:
+        if self._pbar is not None and not needs_recheck:
             self._pbar.update(1)
         return summary
 
@@ -198,9 +213,11 @@ class GraphSummarizer:
                 logger.info("Loaded %d cached summaries from %s", len(cached), self._cache_path)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Failed to load cache from %s: %s", self._cache_path, e)
+        self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
+
     def _clear_recursive(self) -> None:
 
-        self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "[recursive reference to " not in v}
+        self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "[unsummarized reference to " not in v}
 
     def _save_cache(self) -> None:
         """Persist current summaries to disk."""
@@ -250,18 +267,21 @@ class GraphSummarizer:
         total = len(funcs_to_summarize)
         already_cached = total - len(remaining)
 
-        self._pbar = tqdm(total=total, initial=already_cached, desc="Summarizing functions", unit="func")
+        self._pbar = tqdm(file=sys.stdout, total=total, initial=already_cached, desc="Summarizing functions", unit="func")
 
         while remaining:
             self._clear_recursive()
             ready = [f for f in remaining if self._func_is_ready(f)]
-
+            ready_rechecks = [f for f in self._needs_recheck if self._func_is_ready(f)]
+            ready += ready_rechecks
+            if len(ready_rechecks) > 0:
+                self._needs_recheck.remove(*ready_rechecks)
             if not ready:
                 logger.info("remaining: %d functions but nothing ready, breaking cycles", len(remaining))
                 for f in remaining:
                     for dep in self._func_deps.get(f, set()):
                         if dep in remaining and dep not in self._summaries:
-                            self._summaries[dep] = f"[recursive reference to {dep}]"
+                            self._summaries[dep] = f"[unsummarized reference to {dep}]"
                 ready = [f for f in remaining if self._func_is_ready(f)]
                 if not ready:
                     break
