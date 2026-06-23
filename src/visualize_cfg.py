@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
+import ida_domain.functions
 import json
 import argparse
 import os
 import hashlib
+from typing import Hashable
+import ida_domain.types as ida_types
 import networkx as nx
-from idadex import idaapi
 from matplotlib import colormaps
 import matplotlib.colors as mcolors
+from networkx import DiGraph, k_core
 
 
 def get_function_color(func_name, func_colors=None):
@@ -96,20 +99,50 @@ def load_cfg(json_path) -> nx.DiGraph:
             G.nodes[dst]['non_call_links'] = True
     return G
 
+def prune_graph(og: DiGraph[Hashable]) -> DiGraph[Hashable]:
+    to_return = og.copy()
+    print(f"Graph loaded: {len(to_return.nodes)} nodes, {len(to_return.edges)} edges")
+    entrypoint = [x for x in to_return.nodes() if to_return.nodes[x]['entry_point'] == True]
+    print(f"entrypoint is {entrypoint}")
+
+    # remove self loops
+    to_return.remove_edges_from(nx.selfloop_edges(to_return))
+
+    to_return = collapse_thunks(to_return)
+    to_return = collapse_chains(to_return)
+
+    # remove nodes with degree <= 1
+    to_return = k_core(to_return, 2)
+    entrypoint = [x for x in to_return.nodes() if to_return.nodes[x]['entry_point'] == True]
+    print(f"entrypoint is {entrypoint}")
+    # to_be_removed = [x for  x in G.nodes() if G.degree()[x] <= 1]
+    # print(f"Number of nodes to be removed: {len(to_be_removed)}")
+    # G.remove_nodes_from(to_be_removed)
+    # # Basic info
+    # print(f"Number of functions after removing degree <= 1: {len(G.nodes)}")
+    #
+    # print(f"Number of nodes after collapsing chains: {len(G.nodes)}")
+    # entrypoint = [x for x in G.nodes() if G.nodes[x]['entry_point'] == True]
+    # if not entrypoint:
+    #     print("No entrypoint found. Please check the graph.")
+    #     raise ValueError("No entrypoint found")
+    print(f"Graph pruned: {len(to_return.nodes)} nodes, {len(to_return.edges)} edges")
+    return to_return
+
 def collapse_thunks(G: nx.DiGraph):
     collapsed_G = G.copy()
     nodes_to_process = list(collapsed_G.nodes())
 
     for node in nodes_to_process:
 
-        flags = collapsed_G.nodes[node].get('flags', {})
-        if flags & idaapi.FUNC_THUNK:
+        thunk = collapsed_G.nodes[node].get('thunk')
+        if thunk:
             preds = list(collapsed_G.predecessors(node))
             succs = list(collapsed_G.successors(node))
             if len(succs) == 1:
                 collapsed_G.remove_node(node)
                 for pred in preds:
-                    collapsed_G.add_edge(pred, succs[0])
+                    collapsed_G.add_edge(pred, succs[0], type="inter-function")
     return collapsed_G
 
 def collapse_chains(G):
@@ -160,8 +193,11 @@ def collapse_chains(G):
     return collapsed_G
 
 
+
+
 def visualize_cfg(json_path):
     G = load_cfg(json_path)
+    G = prune_graph(G)
     if G is None:
         return
 
