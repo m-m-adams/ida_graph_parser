@@ -11,6 +11,7 @@ to a placeholder summary rather than recursing infinitely.
 """
 
 import json
+import jsonlines
 import os
 import asyncio
 import logging
@@ -22,6 +23,9 @@ from typing import Optional
 import networkx as nx
 from openai import AsyncOpenAI
 from tqdm import tqdm
+
+from extract_cfg import extract_cfg_from_db
+from visualize_cfg import load_cfg, prune_graph
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +198,9 @@ class GraphSummarizer:
             summary = await self._call_llm(FUNC_SYSTEM_PROMPT, user_content, node_id=func_name)
 
         self._summaries[func_name] = summary
-        self._save_cache()
+        if self._cache_path is not None:
+            with jsonlines.open(self._cache_path, mode='a') as writer:
+                writer.write({func_name: summary})
         if self._pbar is not None and not needs_recheck:
             self._pbar.update(1)
         return summary
@@ -207,10 +213,10 @@ class GraphSummarizer:
         """Load cached summaries from disk if available."""
         if self._cache_path and self._cache_path.exists():
             try:
-                with open(self._cache_path, "r") as f:
-                    cached = json.load(f)
-                self._summaries.update(cached)
-                logger.info("Loaded %d cached summaries from %s", len(cached), self._cache_path)
+                with jsonlines.open(self._cache_path, "r") as f:
+                    for line in f:
+                        self._summaries.update(line)
+                logger.info("Loaded %d cached summaries from %s", len(self._summaries), self._cache_path)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Failed to load cache from %s: %s", self._cache_path, e)
         self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
@@ -219,19 +225,6 @@ class GraphSummarizer:
 
         self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "[unsummarized reference to " not in v}
 
-    def _save_cache(self) -> None:
-        """Persist current summaries to disk."""
-        if self._cache_path is None:
-            return
-        try:
-            # Convert keys to strings for JSON serialization
-            data = {str(k): v for k, v in self._summaries.items()}
-            tmp = self._cache_path.with_suffix(".tmp")
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-            tmp.replace(self._cache_path)
-        except OSError as e:
-            logger.warning("Failed to save cache to %s: %s", self._cache_path, e)
 
     async def summarize_all(self, root: Optional[object] = None, cache_path: Optional[str | Path] = None) -> dict:
         """Summarize the entire graph using a bottom-up wave strategy.
@@ -372,3 +365,14 @@ def summarize_graph(
             return future.result()
     else:
         return asyncio.run(coro)
+
+if __name__ == "__main__":
+    logger.setLevel(logging.INFO)
+    logger.addHandler(logging.StreamHandler(stream=sys.stdout))
+    db_path = "/Users/mark/windows_share/test/reorder_and_pad.exe.i64"
+    json_path = "reorder_and_pad2.json"
+    cfg = extract_cfg_from_db(db_path, output_path=json_path)
+    G = load_cfg(cfg)
+    pruned = prune_graph(G)
+    summaries = summarize_graph(pruned, base_url="http://192.168.1.101:8000/v1", max_concurrent=256,
+                                   model="qwen3-coder-next", cache_path="./cache_test_june_23.json")

@@ -215,14 +215,13 @@ def extract_cfg_from_db(db_path, output_path=None):
 
 
             # Save to file
-            if output_path is None:
-                output_path = os.path.splitext(db_path)[0] + "_cfg.json"
-                
-            with open(output_path, "w") as f:
-                json.dump(cfg, f, indent=4)
-            
-            print(f"CFG exported to {output_path}")
-            return output_path
+            if output_path is not None:
+
+                with open(output_path, "w") as f:
+                    json.dump(cfg, f, indent=4)
+
+                print(f"CFG exported to {output_path}")
+            return cfg
 
     except Exception as e:
         print(f"Error during extraction: {e}")

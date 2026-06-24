@@ -4,7 +4,7 @@ import json
 import argparse
 import os
 import hashlib
-from typing import Hashable
+from typing import Hashable, Dict
 import ida_domain.types as ida_types
 import networkx as nx
 from matplotlib import colormaps
@@ -28,17 +28,19 @@ def get_function_color(func_name, func_colors=None):
     hash_object = hashlib.md5(func_name.encode())
     return "#" + hash_object.hexdigest()[:6]
 
-
-def load_cfg(json_path) -> nx.DiGraph:
+def read_json(json_path: str) -> Dict:
     """
-    Loads CFG from JSON and returns a networkx DiGraph.
+    Reads a JSON file and returns its content as a dictionary.
     """
     if not os.path.exists(json_path):
         print(f"Error: File {json_path} not found.")
         return None
 
     with open(json_path, 'r') as f:
-        data = json.load(f)
+        return json.load(f)
+
+def load_cfg(data: Dict) -> nx.DiGraph:
+    #
 
     G = nx.DiGraph()
 
