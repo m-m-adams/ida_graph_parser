@@ -43,16 +43,19 @@ FUNC_SYSTEM_PROMPT = (
 
 FUNC_WITH_DEPS_SYSTEM_PROMPT = (
     "You are a reverse-engineering assistant. "
-    "You are given all basic blocks of a single function's aarch64 assembly, "
-    "along with the control flow between them, followed by summaries of "
-    "other functions that this function calls or jumps to. "
+    "you are given a list of function summaries, one for each called/referenced function. "
+    "You are then given all basic blocks of a single function's aarch64 assembly "
+    "along with the control flow between them. "
     "Summarize what this function does at a high level, incorporating "
     "what the called/referenced functions do. Be concise. "
     "If a summary is not yet available for a called/referenced function, just note how that funtion is called or jumped to. "
     "Focus on how inputs are used and transformed into outputs. "
     "Your audience is an expert reverse engineer. You need to provide them"
     " an accurate understanding of the function's behavior. "
-    "If a function follows standard ABI calling conventions don't reexplain them."
+    "If a function follows standard ABI calling conventions don't reexplain them. "
+    "Be concise and to the point. Do not add markdown or other fluff to the summary. "
+    "The summary should include inputs, outputs, and any points of interest. "
+    "Ensure that the summary is accurate and complete."
 )
 
 
@@ -185,9 +188,10 @@ class GraphSummarizer:
             summary = f"Function {func_name}:\n{blocks_text.strip()}"
         elif deps_text:
             user_content = (
+                f"=== Called/Referenced Function Summaries ==={deps_text}"
                 f"=== Function: {func_name} ===\n"
                 f"=== Basic Blocks ==={blocks_text}\n"
-                f"=== Called/Referenced Function Summaries ==={deps_text}"
+                f"Summarize function {func_name}, including all points of interest. "
             )
             summary = await self._call_llm(FUNC_WITH_DEPS_SYSTEM_PROMPT, user_content, node_id=func_name)
         else:
@@ -200,6 +204,7 @@ class GraphSummarizer:
         self._summaries[func_name] = summary
         if self._cache_path is not None:
             with jsonlines.open(self._cache_path, mode='a') as writer:
+                logger.info("Writing summary for %s to cache", func_name)
                 writer.write({func_name: summary})
         if self._pbar is not None and not needs_recheck:
             self._pbar.update(1)
@@ -218,12 +223,13 @@ class GraphSummarizer:
 
                         self._summaries.update(line)
                 logger.info("Loaded %d cached summaries from %s", len(self._summaries), self._cache_path)
-            except (json.JSONDecodeError, OSError) as e:
+                self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
+                with jsonlines.open(self._cache_path, "w") as f:
+                    for k, v in self._summaries.items():
+                        f.write({k: v})
+            except (jsonlines.Error, OSError) as e:
                 logger.warning("Failed to load cache from %s: %s", self._cache_path, e)
-        self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
-        with jsonlines.open(self._cache_path, "w") as f:
-            for k, v in self._summaries.items():
-                f.write({k: v})
+
 
     def _clear_recursive(self) -> None:
 
@@ -280,11 +286,12 @@ class GraphSummarizer:
                     # Check if any functions that depend on f are now ready
                     # handles things that need a resummary because they had a stub
                     for dep_func in dependents.get(f, set()):
-                        if dep_func in remaining and dep_func not in self._summaries:
+                        if dep_func not in self._summaries:
                             if self._func_is_ready(dep_func):
                                 queue.put_nowait(dep_func)
-                finally:
                     remaining.discard(f)
+                    logger.info("Finished summarizing %s", f)
+                finally:
                     queue.task_done()
 
         # Start workers
@@ -302,17 +309,18 @@ class GraphSummarizer:
                         for dep in self._func_deps.get(f, set()):
                             if dep in remaining and dep not in self._summaries:
                                 self._summaries[dep] = f"[unsummarized reference to {dep}]"
-                                broken = True
-                
-                if broken:
-                    # After breaking cycles, some functions might be ready
-                    for f in remaining:
-                        if self._func_is_ready(f) and f not in self._summaries:
-                            queue.put_nowait(f)
-                else:
+
+                # After breaking cycles, some functions might be ready
+                for f in remaining:
+                    if self._func_is_ready(f):
+                        broken = True
+                        queue.put_nowait(f)
+
+                if not broken:
+                    logging.error("Could not break cycles, giving up. Remaining functions: %s", remaining)
                     # whelp I think we're screwed
                     break
-
+        logger.info("done")
         for w in workers:
             w.cancel()
 
@@ -407,4 +415,5 @@ if __name__ == "__main__":
     G = load_cfg(cfg)
     pruned = prune_graph(G)
     summaries = summarize_graph(pruned, base_url="http://192.168.1.101:8000/v1", max_concurrent=256,
-                                   model="qwen3-coder-next", cache_path="./cache_temp.json")
+                                   model="qwen3-coder-next", cache_path="./cache_temp_temp.json")
+    print("done")
