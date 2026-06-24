@@ -231,16 +231,9 @@ class GraphSummarizer:
 
 
     async def summarize_all(self, root: Optional[object] = None, cache_path: Optional[str | Path] = None) -> dict:
-        """Summarize the entire graph using a bottom-up wave strategy.
+        """Summarize the entire graph using a queue-based worker strategy.
 
-        Processes functions in waves: first all functions with no
-        inter-function dependencies (or whose dependencies are already
-        summarized), then functions that become unblocked, and so on.
-
-        Cycles are broken by inserting placeholder summaries for
-        dependency targets once no more functions can be unblocked.
-
-        Returns a dict mapping function names to their summaries.
+        Processes functions as they become ready (all dependencies summarized).
         """
         # Determine which functions to summarize
         if root is not None:
@@ -266,27 +259,62 @@ class GraphSummarizer:
 
         self._pbar = tqdm(file=sys.stdout, total=total, initial=already_cached, desc="Summarizing functions", unit="func")
 
+        # Map: func_name -> set of functions that depend on it
+        dependents = {f: set() for f in funcs_to_summarize}
+        for f, deps in self._func_deps.items():
+            if f in funcs_to_summarize:
+                for d in deps:
+                    if d in dependents:
+                        dependents[d].add(f)
+
+        queue = asyncio.Queue()
+        for f in remaining:
+            if self._func_is_ready(f):
+                queue.put_nowait(f)
+
+        async def worker():
+            while True:
+                f = await queue.get()
+                try:
+                    await self._summarize_function(f)
+                    # Check if any functions that depend on f are now ready
+                    # handles things that need a resummary because they had a stub
+                    for dep_func in dependents.get(f, set()):
+                        if dep_func in remaining and dep_func not in self._summaries:
+                            if self._func_is_ready(dep_func):
+                                queue.put_nowait(dep_func)
+                finally:
+                    remaining.discard(f)
+                    queue.task_done()
+
+        # Start workers
+        workers = [asyncio.create_task(worker()) for _ in range(self.max_concurrent)]
+
         while remaining:
-            self._clear_recursive()
-            ready = [f for f in remaining if self._func_is_ready(f)]
-            ready_rechecks = [f for f in self._needs_recheck if self._func_is_ready(f)]
-            ready += ready_rechecks
-            if len(ready_rechecks) > 0:
-                self._needs_recheck.remove(*ready_rechecks)
-            if not ready:
+            await queue.join()
+
+            if remaining and queue.empty():
+                # Cycle breaking
                 logger.info("remaining: %d functions but nothing ready, breaking cycles", len(remaining))
+                broken = False
                 for f in remaining:
-                    for dep in self._func_deps.get(f, set()):
-                        if dep in remaining and dep not in self._summaries:
-                            self._summaries[dep] = f"[unsummarized reference to {dep}]"
-                ready = [f for f in remaining if self._func_is_ready(f)]
-                if not ready:
+                    if f not in self._summaries:
+                        for dep in self._func_deps.get(f, set()):
+                            if dep in remaining and dep not in self._summaries:
+                                self._summaries[dep] = f"[unsummarized reference to {dep}]"
+                                broken = True
+                
+                if broken:
+                    # After breaking cycles, some functions might be ready
+                    for f in remaining:
+                        if self._func_is_ready(f) and f not in self._summaries:
+                            queue.put_nowait(f)
+                else:
+                    # whelp I think we're screwed
                     break
 
-            logger.info("Wave: summarizing %d functions concurrently", len(ready))
-            tasks = [self._summarize_function(f) for f in ready]
-            await asyncio.gather(*tasks)
-            remaining -= set(ready)
+        for w in workers:
+            w.cancel()
 
         self._pbar.close()
         self._pbar = None
@@ -379,4 +407,4 @@ if __name__ == "__main__":
     G = load_cfg(cfg)
     pruned = prune_graph(G)
     summaries = summarize_graph(pruned, base_url="http://192.168.1.101:8000/v1", max_concurrent=256,
-                                   model="qwen3-coder-next", cache_path="./cache_full_func.json")
+                                   model="qwen3-coder-next", cache_path="./cache_temp.json")
