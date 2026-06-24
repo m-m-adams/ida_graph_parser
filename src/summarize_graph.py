@@ -215,11 +215,15 @@ class GraphSummarizer:
             try:
                 with jsonlines.open(self._cache_path, "r") as f:
                     for line in f:
+
                         self._summaries.update(line)
                 logger.info("Loaded %d cached summaries from %s", len(self._summaries), self._cache_path)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Failed to load cache from %s: %s", self._cache_path, e)
         self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
+        with jsonlines.open(self._cache_path, "w") as f:
+            for k, v in self._summaries.items():
+                f.write({k: v})
 
     def _clear_recursive(self) -> None:
 
@@ -375,4 +379,4 @@ if __name__ == "__main__":
     G = load_cfg(cfg)
     pruned = prune_graph(G)
     summaries = summarize_graph(pruned, base_url="http://192.168.1.101:8000/v1", max_concurrent=256,
-                                   model="qwen3-coder-next", cache_path="./cache_test_june_23.json")
+                                   model="qwen3-coder-next", cache_path="./cache_full_func.json")
