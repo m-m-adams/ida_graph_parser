@@ -11,6 +11,7 @@ to a placeholder summary rather than recursing infinitely.
 """
 
 import json
+import jsonlines
 import os
 import asyncio
 import logging
@@ -22,6 +23,9 @@ from typing import Optional
 import networkx as nx
 from openai import AsyncOpenAI
 from tqdm import tqdm
+
+from extract_cfg import extract_cfg_from_db
+from visualize_cfg import load_cfg, prune_graph
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +43,19 @@ FUNC_SYSTEM_PROMPT = (
 
 FUNC_WITH_DEPS_SYSTEM_PROMPT = (
     "You are a reverse-engineering assistant. "
-    "You are given all basic blocks of a single function's aarch64 assembly, "
-    "along with the control flow between them, followed by summaries of "
-    "other functions that this function calls or jumps to. "
+    "you are given a list of function summaries, one for each called/referenced function. "
+    "You are then given all basic blocks of a single function's aarch64 assembly "
+    "along with the control flow between them. "
     "Summarize what this function does at a high level, incorporating "
     "what the called/referenced functions do. Be concise. "
     "If a summary is not yet available for a called/referenced function, just note how that funtion is called or jumped to. "
     "Focus on how inputs are used and transformed into outputs. "
     "Your audience is an expert reverse engineer. You need to provide them"
     " an accurate understanding of the function's behavior. "
-    "If a function follows standard ABI calling conventions don't reexplain them."
+    "If a function follows standard ABI calling conventions don't reexplain them. "
+    "Be concise and to the point. Do not add markdown or other fluff to the summary. "
+    "The summary should include inputs, outputs, and any points of interest. "
+    "Ensure that the summary is accurate and complete."
 )
 
 
@@ -181,9 +188,10 @@ class GraphSummarizer:
             summary = f"Function {func_name}:\n{blocks_text.strip()}"
         elif deps_text:
             user_content = (
+                f"=== Called/Referenced Function Summaries ==={deps_text}"
                 f"=== Function: {func_name} ===\n"
                 f"=== Basic Blocks ==={blocks_text}\n"
-                f"=== Called/Referenced Function Summaries ==={deps_text}"
+                f"Summarize function {func_name}, including all points of interest. "
             )
             summary = await self._call_llm(FUNC_WITH_DEPS_SYSTEM_PROMPT, user_content, node_id=func_name)
         else:
@@ -194,7 +202,10 @@ class GraphSummarizer:
             summary = await self._call_llm(FUNC_SYSTEM_PROMPT, user_content, node_id=func_name)
 
         self._summaries[func_name] = summary
-        self._save_cache()
+        if self._cache_path is not None:
+            with jsonlines.open(self._cache_path, mode='a') as writer:
+                logger.info("Writing summary for %s to cache", func_name)
+                writer.write({func_name: summary})
         if self._pbar is not None and not needs_recheck:
             self._pbar.update(1)
         return summary
@@ -207,43 +218,28 @@ class GraphSummarizer:
         """Load cached summaries from disk if available."""
         if self._cache_path and self._cache_path.exists():
             try:
-                with open(self._cache_path, "r") as f:
-                    cached = json.load(f)
-                self._summaries.update(cached)
-                logger.info("Loaded %d cached summaries from %s", len(cached), self._cache_path)
-            except (json.JSONDecodeError, OSError) as e:
+                with jsonlines.open(self._cache_path, "r") as f:
+                    for line in f:
+
+                        self._summaries.update(line)
+                logger.info("Loaded %d cached summaries from %s", len(self._summaries), self._cache_path)
+                self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
+                with jsonlines.open(self._cache_path, "w") as f:
+                    for k, v in self._summaries.items():
+                        f.write({k: v})
+            except (jsonlines.Error, OSError) as e:
                 logger.warning("Failed to load cache from %s: %s", self._cache_path, e)
-        self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
+
 
     def _clear_recursive(self) -> None:
 
         self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "[unsummarized reference to " not in v}
 
-    def _save_cache(self) -> None:
-        """Persist current summaries to disk."""
-        if self._cache_path is None:
-            return
-        try:
-            # Convert keys to strings for JSON serialization
-            data = {str(k): v for k, v in self._summaries.items()}
-            tmp = self._cache_path.with_suffix(".tmp")
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-            tmp.replace(self._cache_path)
-        except OSError as e:
-            logger.warning("Failed to save cache to %s: %s", self._cache_path, e)
 
     async def summarize_all(self, root: Optional[object] = None, cache_path: Optional[str | Path] = None) -> dict:
-        """Summarize the entire graph using a bottom-up wave strategy.
+        """Summarize the entire graph using a queue-based worker strategy.
 
-        Processes functions in waves: first all functions with no
-        inter-function dependencies (or whose dependencies are already
-        summarized), then functions that become unblocked, and so on.
-
-        Cycles are broken by inserting placeholder summaries for
-        dependency targets once no more functions can be unblocked.
-
-        Returns a dict mapping function names to their summaries.
+        Processes functions as they become ready (all dependencies summarized).
         """
         # Determine which functions to summarize
         if root is not None:
@@ -269,27 +265,64 @@ class GraphSummarizer:
 
         self._pbar = tqdm(file=sys.stdout, total=total, initial=already_cached, desc="Summarizing functions", unit="func")
 
-        while remaining:
-            self._clear_recursive()
-            ready = [f for f in remaining if self._func_is_ready(f)]
-            ready_rechecks = [f for f in self._needs_recheck if self._func_is_ready(f)]
-            ready += ready_rechecks
-            if len(ready_rechecks) > 0:
-                self._needs_recheck.remove(*ready_rechecks)
-            if not ready:
-                logger.info("remaining: %d functions but nothing ready, breaking cycles", len(remaining))
-                for f in remaining:
-                    for dep in self._func_deps.get(f, set()):
-                        if dep in remaining and dep not in self._summaries:
-                            self._summaries[dep] = f"[unsummarized reference to {dep}]"
-                ready = [f for f in remaining if self._func_is_ready(f)]
-                if not ready:
-                    break
+        # Map: func_name -> set of functions that depend on it
+        dependents = {f: set() for f in funcs_to_summarize}
+        for f, deps in self._func_deps.items():
+            if f in funcs_to_summarize:
+                for d in deps:
+                    if d in dependents:
+                        dependents[d].add(f)
 
-            logger.info("Wave: summarizing %d functions concurrently", len(ready))
-            tasks = [self._summarize_function(f) for f in ready]
-            await asyncio.gather(*tasks)
-            remaining -= set(ready)
+        queue = asyncio.Queue()
+        for f in remaining:
+            if self._func_is_ready(f):
+                queue.put_nowait(f)
+
+        async def worker():
+            while True:
+                f = await queue.get()
+                try:
+                    await self._summarize_function(f)
+                    # Check if any functions that depend on f are now ready
+                    # handles things that need a resummary because they had a stub
+                    for dep_func in dependents.get(f, set()):
+                        if dep_func not in self._summaries:
+                            if self._func_is_ready(dep_func):
+                                queue.put_nowait(dep_func)
+                    remaining.discard(f)
+                    logger.info("Finished summarizing %s", f)
+                finally:
+                    queue.task_done()
+
+        # Start workers
+        workers = [asyncio.create_task(worker()) for _ in range(self.max_concurrent)]
+
+        while remaining:
+            await queue.join()
+
+            if remaining and queue.empty():
+                # Cycle breaking
+                logger.info("remaining: %d functions but nothing ready, breaking cycles", len(remaining))
+                broken = False
+                for f in remaining:
+                    if f not in self._summaries:
+                        for dep in self._func_deps.get(f, set()):
+                            if dep in remaining and dep not in self._summaries:
+                                self._summaries[dep] = f"[unsummarized reference to {dep}]"
+
+                # After breaking cycles, some functions might be ready
+                for f in remaining:
+                    if self._func_is_ready(f):
+                        broken = True
+                        queue.put_nowait(f)
+
+                if not broken:
+                    logging.error("Could not break cycles, giving up. Remaining functions: %s", remaining)
+                    # whelp I think we're screwed
+                    break
+        logger.info("done")
+        for w in workers:
+            w.cancel()
 
         self._pbar.close()
         self._pbar = None
@@ -372,3 +405,15 @@ def summarize_graph(
             return future.result()
     else:
         return asyncio.run(coro)
+
+if __name__ == "__main__":
+    logger.setLevel(logging.INFO)
+    logger.addHandler(logging.StreamHandler(stream=sys.stdout))
+    db_path = "/Users/mark/windows_share/test/reorder_and_pad.exe.i64"
+    json_path = "reorder_and_pad2.json"
+    cfg = extract_cfg_from_db(db_path, output_path=json_path)
+    G = load_cfg(cfg)
+    pruned = prune_graph(G)
+    summaries = summarize_graph(pruned, base_url="http://192.168.1.101:8000/v1", max_concurrent=256,
+                                   model="qwen3-coder-next", cache_path="./cache_temp_temp.json")
+    print("done")

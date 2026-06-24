@@ -16,4 +16,5 @@ dependencies = [
     "nest-asyncio>=1.5.0",
     "tqdm>=4.68.2",
     "ipywidgets>=8.1.8",
+    "jsonlines>=4.0.0",
 ]

@@ -7,9 +7,12 @@ import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Any
 
+import logging
 from ida_domain import Database
 from ida_domain.flowchart import FlowChartFlags
 from ida_ua import insn_t
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -18,6 +21,7 @@ class FuncNodeInfo:
     start_ea: int
     end_ea: int
     flags: int
+    thunk: bool = False
     entry_point: bool = False
     imported: bool = False
     module: Optional[str] = None
@@ -88,13 +92,13 @@ def extract_cfg_from_db(db_path, output_path=None):
                 functions_found += 1
                 func_ea = func.start_ea
                 func_name = func.name
-                if func.flags & idaapi.FUNC_THUNK:
-                    print(f"Skipping thunk function {func_name} @ {hex(func_ea)}")
+                thunk = func.flags & idaapi.FUNC_THUNK
                 func_node_info = FuncNodeInfo(
                     name=func_name,
                     start_ea=func.start_ea,
                     end_ea=func.end_ea,
                     entry_point=func_ea in entry_addresses,
+                    thunk=thunk,
                     flags=func.flags,
                 ).to_dict()
                 # Use string representation of EA for JSON keys
@@ -138,10 +142,25 @@ def extract_cfg_from_db(db_path, output_path=None):
                     is_cond = (num_succs > 1)
 
                     for succ in block.get_successors():
+                        flow_type = "unknown"
+                        xrefs_to_block = db.xrefs.to_ea(succ.start_ea)
+                        for xref in xrefs_to_block:
+                            if block.start_ea <= xref.from_ea <= block.end_ea:
+                                flow_type = xref.type.name
+                        if flow_type == "unknown":
+                            # look for double refs - refs via an intermediate block
+                            # case is when the next block is referenced from a memory location, and that memory location also references the block we're looking at
+                            # matches structured exception handling
+                            for xref in db.xrefs.to_ea(succ.start_ea):
+                                for xxref in db.xrefs.from_ea(xref.from_ea):
+                                    if block.start_ea <= xxref.to_ea <= block.end_ea:
+                                        flow_type = "exception"
+                        if flow_type == "unknown":
+                            logger.warning(f"No flow type for block {hex(block.start_ea)} -> {hex(succ.start_ea)}")
                         cfg["edges"].append({
                             "src": hex(block.start_ea),
                             "dst": hex(succ.start_ea),
-                            "type": "intra-function",
+                            "type": flow_type,
                             "conditional": bool(is_cond)
                         })
 
@@ -175,7 +194,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                         cfg["edges"].append({
                             "src": hex(src_block_ea),
                             "dst": hex(xref.to_ea),
-                            "type": "inter-function",
+                            "type": "call",
                             "conditional": False
                         })
                     else:
@@ -184,7 +203,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                         cfg["edges"].append({
                             "src": hex(src_block_ea),
                             "dst": hex(xref.to_ea),
-                            "type": "non-call",
+                            "type": xref.type.name,
                             "conditional": False
                         })
             # Add edges for calls to imported functions
@@ -214,14 +233,13 @@ def extract_cfg_from_db(db_path, output_path=None):
 
 
             # Save to file
-            if output_path is None:
-                output_path = os.path.splitext(db_path)[0] + "_cfg.json"
-                
-            with open(output_path, "w") as f:
-                json.dump(cfg, f, indent=4)
-            
-            print(f"CFG exported to {output_path}")
-            return output_path
+            if output_path is not None:
+
+                with open(output_path, "w") as f:
+                    json.dump(cfg, f, indent=4)
+
+                print(f"CFG exported to {output_path}")
+            return cfg
 
     except Exception as e:
         print(f"Error during extraction: {e}")
