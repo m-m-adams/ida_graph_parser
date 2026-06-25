@@ -159,11 +159,11 @@ class GraphSummarizer:
             # Add intra-function edges info
             for succ in self.graph.successors(nid):
                 edge_data = self.graph.get_edge_data(nid, succ) or {}
-                edge_type = edge_data.get("type", "unknown")
-                if edge_type == "intra-function":
+                edge_type = edge_data["type"]
+                if edge_type != "call":
                     succ_label = self.graph.nodes[succ].get("label", str(succ))
-                    cond = edge_data.get("conditional", False)
-                    blocks_text += f"  -> {succ_label} (conditional={cond})\n"
+                    type = edge_data["type"]
+                    blocks_text += f"  -> {succ_label} (type: {type})\n"
 
         # Check for inter-function dependencies
         deps = self._func_deps.get(func_name, set())
