@@ -10,9 +10,7 @@ Handles cycles by treating back-edges (to already-visited nodes) as references
 to a placeholder summary rather than recursing infinitely.
 """
 
-import json
 import jsonlines
-import os
 import asyncio
 import logging
 import sys
@@ -21,16 +19,15 @@ from pathlib import Path
 from typing import Optional
 
 import networkx as nx
-from openai import AsyncOpenAI
 from tqdm import tqdm
 
+import llm_interface
 from extract_cfg import extract_cfg_from_db
+from llm_interface import LLMInterface
 from visualize_cfg import load_cfg, prune_graph
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-4o-mini"
-DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 FUNC_SYSTEM_PROMPT = (
     "You are a reverse-engineering assistant. "
@@ -57,56 +54,6 @@ FUNC_WITH_DEPS_SYSTEM_PROMPT = (
     "The summary should include inputs, outputs, and any points of interest. "
     "Ensure that the summary is accurate and complete."
 )
-
-
-class LLMInterface:
-    """Handles communication with the LLM API."""
-
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
-        max_concurrent: int = 10,
-        use_ollama: bool = False,
-    ):
-        if use_ollama:
-            base_url = base_url or os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_BASE_URL)
-            if not base_url.rstrip("/").endswith("/v1"):
-                base_url = base_url.rstrip("/") + "/v1"
-            api_key = api_key or "ollama"
-            model = model if model != DEFAULT_MODEL else "short-context-model"
-        self.model = model
-        self.client = AsyncOpenAI(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "unused"),
-            base_url=base_url or os.environ.get("OPENAI_BASE_URL"),
-        )
-        self.max_concurrent = max_concurrent
-        self._semaphore: Optional[asyncio.Semaphore] = None
-        self._active_requests = 0
-
-    def _ensure_semaphore(self):
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self.max_concurrent)
-
-    async def call_llm(self, system: str, user: str, node_id: str = "?") -> str:
-        """Send an async chat completion request, limited by semaphore."""
-        self._ensure_semaphore()
-        async with self._semaphore:
-            self._active_requests += 1
-            start = time.perf_counter()
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                )
-                return response.choices[0].message.content.strip()
-            finally:
-                elapsed = time.perf_counter() - start
-                self._active_requests -= 1
 
 
 class GraphSummarizer:
@@ -229,7 +176,6 @@ class GraphSummarizer:
             try:
                 with jsonlines.open(self._cache_path, "r") as f:
                     for line in f:
-
                         self._summaries.update(line)
                 logger.info("Loaded %d cached summaries from %s", len(self._summaries), self._cache_path)
                 self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
@@ -347,7 +293,7 @@ def summarize_graph(
     *,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
+    model: str = llm_interface.DEFAULT_MODEL,
     root: Optional[object] = None,
     max_concurrent: int = 10,
     use_ollama: bool = False,
