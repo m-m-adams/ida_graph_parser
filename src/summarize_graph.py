@@ -10,9 +10,7 @@ Handles cycles by treating back-edges (to already-visited nodes) as references
 to a placeholder summary rather than recursing infinitely.
 """
 
-import json
 import jsonlines
-import os
 import asyncio
 import logging
 import sys
@@ -21,16 +19,15 @@ from pathlib import Path
 from typing import Optional
 
 import networkx as nx
-from openai import AsyncOpenAI
 from tqdm import tqdm
 
+import llm_interface
 from extract_cfg import extract_cfg_from_db
+from llm_interface import LLMInterface
 from visualize_cfg import load_cfg, prune_graph
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-4o-mini"
-DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 FUNC_SYSTEM_PROMPT = (
     "You are a reverse-engineering assistant. "
@@ -66,30 +63,12 @@ class GraphSummarizer:
     def __init__(
         self,
         graph: nx.DiGraph,
-        *,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
-        max_concurrent: int = 10,
-        use_ollama: bool = False,
+        llm: LLMInterface,
     ):
         self.graph = graph
-        if use_ollama:
-            base_url = base_url or os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_BASE_URL)
-            if not base_url.rstrip("/").endswith("/v1"):
-                base_url = base_url.rstrip("/") + "/v1"
-            api_key = api_key or "ollama"
-            model = model if model != DEFAULT_MODEL else "short-context-model"
-        self.model = model
-        self.client = AsyncOpenAI(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "unused"),
-            base_url=base_url or os.environ.get("OPENAI_BASE_URL"),
-        )
-        self.max_concurrent = max_concurrent
-        self._semaphore: Optional[asyncio.Semaphore] = None
+        self.llm = llm
         # func_name -> summary string
         self._summaries: dict[str, str] = {}
-        self._active_requests = 0
         self._t0 = time.perf_counter()
         self._cache_path: Optional[Path] = None
         self._pbar: Optional[tqdm] = None
@@ -108,29 +87,6 @@ class GraphSummarizer:
                 dst_func = self.graph.nodes[dst].get("func", str(dst))
                 if src_func != dst_func:
                     self._func_deps[src_func].add(dst_func)
-
-    def _ensure_semaphore(self):
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self.max_concurrent)
-
-    async def _call_llm(self, system: str, user: str, node_id: str = "?") -> str:
-        """Send an async chat completion request, limited by semaphore."""
-        self._ensure_semaphore()
-        async with self._semaphore:
-            self._active_requests += 1
-            start = time.perf_counter()
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                )
-                return response.choices[0].message.content.strip()
-            finally:
-                elapsed = time.perf_counter() - start
-                self._active_requests -= 1
 
     def _func_is_ready(self, func_name: str) -> bool:
         """Check if all inter-function dependencies of a function are summarized."""
@@ -159,11 +115,11 @@ class GraphSummarizer:
             # Add intra-function edges info
             for succ in self.graph.successors(nid):
                 edge_data = self.graph.get_edge_data(nid, succ) or {}
-                edge_type = edge_data.get("type", "unknown")
-                if edge_type == "intra-function":
+                edge_type = edge_data["type"]
+                if edge_type != "call":
                     succ_label = self.graph.nodes[succ].get("label", str(succ))
-                    cond = edge_data.get("conditional", False)
-                    blocks_text += f"  -> {succ_label} (conditional={cond})\n"
+                    type = edge_data["type"]
+                    blocks_text += f"  -> {succ_label} (type: {type})\n"
 
         # Check for inter-function dependencies
         deps = self._func_deps.get(func_name, set())
@@ -193,13 +149,13 @@ class GraphSummarizer:
                 f"=== Basic Blocks ==={blocks_text}\n"
                 f"Summarize function {func_name}, including all points of interest. "
             )
-            summary = await self._call_llm(FUNC_WITH_DEPS_SYSTEM_PROMPT, user_content, node_id=func_name)
+            summary = await self.llm.call_llm(FUNC_WITH_DEPS_SYSTEM_PROMPT, user_content, node_id=func_name)
         else:
             user_content = (
                 f"=== Function: {func_name} ===\n"
                 f"=== Basic Blocks ==={blocks_text}"
             )
-            summary = await self._call_llm(FUNC_SYSTEM_PROMPT, user_content, node_id=func_name)
+            summary = await self.llm.call_llm(FUNC_SYSTEM_PROMPT, user_content, node_id=func_name)
 
         self._summaries[func_name] = summary
         if self._cache_path is not None:
@@ -220,7 +176,6 @@ class GraphSummarizer:
             try:
                 with jsonlines.open(self._cache_path, "r") as f:
                     for line in f:
-
                         self._summaries.update(line)
                 logger.info("Loaded %d cached summaries from %s", len(self._summaries), self._cache_path)
                 self._summaries = {k: v for k, v in self._summaries.items() if not isinstance(v, str) or "unsummarized" not in v}
@@ -295,7 +250,7 @@ class GraphSummarizer:
                     queue.task_done()
 
         # Start workers
-        workers = [asyncio.create_task(worker()) for _ in range(self.max_concurrent)]
+        workers = [asyncio.create_task(worker()) for _ in range(self.llm.max_concurrent)]
 
         while remaining:
             await queue.join()
@@ -338,7 +293,7 @@ def summarize_graph(
     *,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
+    model: str = llm_interface.DEFAULT_MODEL,
     root: Optional[object] = None,
     max_concurrent: int = 10,
     use_ollama: bool = False,
@@ -381,13 +336,16 @@ def summarize_graph(
     dict
         Mapping of node ids to summary strings.
     """
-    summarizer = GraphSummarizer(
-        graph,
+    llm = LLMInterface(
         api_key=api_key,
         base_url=base_url,
         model=model,
         max_concurrent=max_concurrent,
         use_ollama=use_ollama,
+    )
+    summarizer = GraphSummarizer(
+        graph,
+        llm=llm,
     )
     coro = summarizer.summarize_all(root=root, cache_path=cache_path)
     try:

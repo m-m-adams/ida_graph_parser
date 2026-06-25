@@ -7,9 +7,12 @@ import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Any
 
+import logging
 from ida_domain import Database
 from ida_domain.flowchart import FlowChartFlags
 from ida_ua import insn_t
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -136,14 +139,27 @@ def extract_cfg_from_db(db_path, output_path=None):
                     
                     # Determine if the exit from this block is conditional
                     num_succs = block.count_successors()
-                    is_cond = (num_succs > 1)
 
                     for succ in block.get_successors():
+                        flow_type = "unknown"
+                        xrefs_to_block = db.xrefs.to_ea(succ.start_ea)
+                        for xref in xrefs_to_block:
+                            if block.start_ea <= xref.from_ea <= block.end_ea:
+                                flow_type = xref.type.name
+                        if flow_type == "unknown":
+                            # look for double refs - refs via an intermediate block
+                            # case is when the next block is referenced from a memory location, and that memory location also references the block we're looking at
+                            # matches structured exception handling
+                            for xref in db.xrefs.to_ea(succ.start_ea):
+                                for xxref in db.xrefs.from_ea(xref.from_ea):
+                                    if block.start_ea <= xxref.to_ea <= block.end_ea:
+                                        flow_type = "exception"
+                        if flow_type == "unknown":
+                            logger.warning(f"No flow type for block {hex(block.start_ea)} -> {hex(succ.start_ea)}")
                         cfg["edges"].append({
                             "src": hex(block.start_ea),
                             "dst": hex(succ.start_ea),
-                            "type": "intra-function",
-                            "conditional": bool(is_cond)
+                            "type": flow_type,
                         })
 
             print(f"Found {functions_found} functions.")
@@ -176,8 +192,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                         cfg["edges"].append({
                             "src": hex(src_block_ea),
                             "dst": hex(xref.to_ea),
-                            "type": "inter-function",
-                            "conditional": False
+                            "type": "call",
                         })
                     else:
                         if "main" in func.name.lower():
@@ -185,8 +200,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                         cfg["edges"].append({
                             "src": hex(src_block_ea),
                             "dst": hex(xref.to_ea),
-                            "type": "non-call",
-                            "conditional": False
+                            "type": xref.type.name,
                         })
             # Add edges for calls to imported functions
             print("Extracting calls to imported functions...")
