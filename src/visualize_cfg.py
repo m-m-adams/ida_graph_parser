@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-import ida_domain.functions
 import json
 import argparse
 import os
 import hashlib
 from typing import Hashable, Dict
-import ida_domain.types as ida_types
 import networkx as nx
 from matplotlib import colormaps
 import matplotlib.colors as mcolors
@@ -95,8 +93,8 @@ def load_cfg(data: Dict) -> nx.DiGraph:
                     G.add_node(node_ea, label=f"unknown @ {hex(node_ea)}", func="unknown",
                                color=get_function_color("unknown", func_colors))
 
-        G.add_edge(src, dst, type=edge['type'], conditional=edge.get('conditional', False))
-        if edge['type'] == 'non-call':
+        G.add_edge(src, dst, type=edge['type'])
+        if edge['type'] != 'call':
             G.nodes[src]['non_call_links'] = True
             G.nodes[dst]['non_call_links'] = True
     return G
@@ -144,7 +142,7 @@ def collapse_thunks(G: nx.DiGraph):
             if len(succs) == 1:
                 collapsed_G.remove_node(node)
                 for pred in preds:
-                    collapsed_G.add_edge(pred, succs[0], type="inter-function")
+                    collapsed_G.add_edge(pred, succs[0], type="call")
     return collapsed_G
 
 def collapse_chains(G):
@@ -181,8 +179,8 @@ def collapse_chains(G):
 
                                 # If any part of the collapsed chain was an inter-function call,
                                 # keep it marked as such.
-                                if edge2_data.get('type') == 'inter-function':
-                                    new_attrs['type'] = 'inter-function'
+                                if edge2_data.get('type') == 'call':
+                                    new_attrs['type'] = 'call'
 
                                 collapsed_G.add_edge(pred, succ, **new_attrs)
                                 collapsed_G.remove_node(node)

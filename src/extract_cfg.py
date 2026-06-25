@@ -139,7 +139,6 @@ def extract_cfg_from_db(db_path, output_path=None):
                     
                     # Determine if the exit from this block is conditional
                     num_succs = block.count_successors()
-                    is_cond = (num_succs > 1)
 
                     for succ in block.get_successors():
                         flow_type = "unknown"
@@ -161,7 +160,6 @@ def extract_cfg_from_db(db_path, output_path=None):
                             "src": hex(block.start_ea),
                             "dst": hex(succ.start_ea),
                             "type": flow_type,
-                            "conditional": bool(is_cond)
                         })
 
             print(f"Found {functions_found} functions.")
@@ -195,7 +193,6 @@ def extract_cfg_from_db(db_path, output_path=None):
                             "src": hex(src_block_ea),
                             "dst": hex(xref.to_ea),
                             "type": "call",
-                            "conditional": False
                         })
                     else:
                         if "main" in func.name.lower():
@@ -204,7 +201,6 @@ def extract_cfg_from_db(db_path, output_path=None):
                             "src": hex(src_block_ea),
                             "dst": hex(xref.to_ea),
                             "type": xref.type.name,
-                            "conditional": False
                         })
             # Add edges for calls to imported functions
             print("Extracting calls to imported functions...")
