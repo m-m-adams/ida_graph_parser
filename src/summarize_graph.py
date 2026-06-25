@@ -59,21 +59,17 @@ FUNC_WITH_DEPS_SYSTEM_PROMPT = (
 )
 
 
-class GraphSummarizer:
-    """Walks a directed graph and recursively summarizes each node via an
-    OpenAI-compatible chat completions API."""
+class LLMInterface:
+    """Handles communication with the LLM API."""
 
     def __init__(
         self,
-        graph: nx.DiGraph,
-        *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: str = DEFAULT_MODEL,
         max_concurrent: int = 10,
         use_ollama: bool = False,
     ):
-        self.graph = graph
         if use_ollama:
             base_url = base_url or os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_BASE_URL)
             if not base_url.rstrip("/").endswith("/v1"):
@@ -87,9 +83,45 @@ class GraphSummarizer:
         )
         self.max_concurrent = max_concurrent
         self._semaphore: Optional[asyncio.Semaphore] = None
+        self._active_requests = 0
+
+    def _ensure_semaphore(self):
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.max_concurrent)
+
+    async def call_llm(self, system: str, user: str, node_id: str = "?") -> str:
+        """Send an async chat completion request, limited by semaphore."""
+        self._ensure_semaphore()
+        async with self._semaphore:
+            self._active_requests += 1
+            start = time.perf_counter()
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                )
+                return response.choices[0].message.content.strip()
+            finally:
+                elapsed = time.perf_counter() - start
+                self._active_requests -= 1
+
+
+class GraphSummarizer:
+    """Walks a directed graph and recursively summarizes each node via an
+    OpenAI-compatible chat completions API."""
+
+    def __init__(
+        self,
+        graph: nx.DiGraph,
+        llm: LLMInterface,
+    ):
+        self.graph = graph
+        self.llm = llm
         # func_name -> summary string
         self._summaries: dict[str, str] = {}
-        self._active_requests = 0
         self._t0 = time.perf_counter()
         self._cache_path: Optional[Path] = None
         self._pbar: Optional[tqdm] = None
@@ -108,29 +140,6 @@ class GraphSummarizer:
                 dst_func = self.graph.nodes[dst].get("func", str(dst))
                 if src_func != dst_func:
                     self._func_deps[src_func].add(dst_func)
-
-    def _ensure_semaphore(self):
-        if self._semaphore is None:
-            self._semaphore = asyncio.Semaphore(self.max_concurrent)
-
-    async def _call_llm(self, system: str, user: str, node_id: str = "?") -> str:
-        """Send an async chat completion request, limited by semaphore."""
-        self._ensure_semaphore()
-        async with self._semaphore:
-            self._active_requests += 1
-            start = time.perf_counter()
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                )
-                return response.choices[0].message.content.strip()
-            finally:
-                elapsed = time.perf_counter() - start
-                self._active_requests -= 1
 
     def _func_is_ready(self, func_name: str) -> bool:
         """Check if all inter-function dependencies of a function are summarized."""
@@ -193,13 +202,13 @@ class GraphSummarizer:
                 f"=== Basic Blocks ==={blocks_text}\n"
                 f"Summarize function {func_name}, including all points of interest. "
             )
-            summary = await self._call_llm(FUNC_WITH_DEPS_SYSTEM_PROMPT, user_content, node_id=func_name)
+            summary = await self.llm.call_llm(FUNC_WITH_DEPS_SYSTEM_PROMPT, user_content, node_id=func_name)
         else:
             user_content = (
                 f"=== Function: {func_name} ===\n"
                 f"=== Basic Blocks ==={blocks_text}"
             )
-            summary = await self._call_llm(FUNC_SYSTEM_PROMPT, user_content, node_id=func_name)
+            summary = await self.llm.call_llm(FUNC_SYSTEM_PROMPT, user_content, node_id=func_name)
 
         self._summaries[func_name] = summary
         if self._cache_path is not None:
@@ -295,7 +304,7 @@ class GraphSummarizer:
                     queue.task_done()
 
         # Start workers
-        workers = [asyncio.create_task(worker()) for _ in range(self.max_concurrent)]
+        workers = [asyncio.create_task(worker()) for _ in range(self.llm.max_concurrent)]
 
         while remaining:
             await queue.join()
@@ -381,13 +390,16 @@ def summarize_graph(
     dict
         Mapping of node ids to summary strings.
     """
-    summarizer = GraphSummarizer(
-        graph,
+    llm = LLMInterface(
         api_key=api_key,
         base_url=base_url,
         model=model,
         max_concurrent=max_concurrent,
         use_ollama=use_ollama,
+    )
+    summarizer = GraphSummarizer(
+        graph,
+        llm=llm,
     )
     coro = summarizer.summarize_all(root=root, cache_path=cache_path)
     try:
