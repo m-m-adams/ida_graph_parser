@@ -58,3 +58,30 @@ Run the visualization script:
 ```bash
 python3 -m src.visualize_cfg your_database_cfg.json
 ```
+
+### 3. Function Annotations in IDA Pro GUI
+
+Once the summaries and function names are extracted into the correct JSON schema, they can be directly annotated as comments in an IDA database.
+
+**Usage:**
+1. With an IDA project open, go to File -> Script file... and select `annotate_ida_db.py`. This will load the script into IDA's Pytohn environment.
+
+2. In the Python console at the bottom, call the function annotate_all(). This will prompt you for two JSON/JSONL files. The first contains the full function summaries following the schema:
+```
+{<function_name>: <function_description>, 
+...
+}
+```
+
+and the second contains the original function name, the updated LLM-generated name, and a short one-line description to use at function calls. This JSONL follows the schema:
+
+```
+{"original_name": <original function name>, 
+"title": <new function name>, 
+"one_line_summary": <one-line summary>},
+
+...
+
+```
+
+TODO: Use a single json file and schema for both eventually.
