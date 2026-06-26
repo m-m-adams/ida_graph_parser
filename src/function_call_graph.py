@@ -1,9 +1,9 @@
 # Visualize Level0 summaries - which are summaries for each function
 import networkx as nx
 
-def get_level0_summary_graph(G, *, include_non_call=True, include_unknown=True):
+def get_level0_summary_graph(G, *, include_non_call=False, include_unknown=False):
     function_graph = nx.DiGraph()
-    call_edge_types = {"inter-function", "imported-function"}
+    call_edge_types = {"call", "imported-function"}
     if include_non_call:
         call_edge_types.add("non-call")
     if include_unknown:
