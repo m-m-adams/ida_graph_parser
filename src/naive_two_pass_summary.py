@@ -73,7 +73,7 @@ async def async_generate(prompt, system_prompt=None):
         return await loop.run_in_executor(None, generate, prompt, system_prompt)
 
 # Load graph
-G = load_cfg('reorder_and_pad2.json') 
+G = load_cfg('parsed_xref_graph.json')
 
 # Aggregate Communities
 G_communities, community_list = collapse_leiden(G, resolution=0.001)

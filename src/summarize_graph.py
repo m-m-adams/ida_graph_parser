@@ -366,7 +366,7 @@ if __name__ == "__main__":
     logger.setLevel(logging.INFO)
     logger.addHandler(logging.StreamHandler(stream=sys.stdout))
     db_path = "/Users/mark/windows_share/test/reorder_and_pad.exe.i64"
-    json_path = "reorder_and_pad2.json"
+    json_path = "parsed_xref_graph.json"
     cfg = extract_cfg_from_db(db_path, output_path=json_path)
     G = load_cfg(cfg)
     pruned = prune_graph(G)
