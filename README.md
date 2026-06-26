@@ -1,87 +1,106 @@
-# IDA CFG Parser
+# IDA Annotator
 
-This project provides a set of scripts to extract and visualize a full program Control Flow Graph (CFG) from an IDA Pro database (.idb or .i64).
+This project provides a comprehensive workflow to extract a Control Flow Graph (CFG) from IDA Pro, 
+process it using LLMs to generate high-level summaries and titles, and then re-import those annotations 
+back into IDA for further analysis.
+
+Turn this:
+![before](images/before.png)
+
+into this:
+![after](images/after.png)
+
+# Context leads to better summaries
+Rather than feeding dissassembled code to LLMs, leading to hallucinations and inaccuracies, we first break
+down the binary into a graph representation built from ida XRefs, call graph, and control flow graph.
+Summaries are generated recursively, incorporating context from called functions and referenced data, 
+leading to more accurate and useful results.
+
+## Comparison
+
+This image represents using the same prompts to generate summaries based on pure dissassembly text or using the graph context.
+
+![Comparison](images/comparison.png)
+
+Red arrow - sub_140001040 is incorrectly guessed as a function dispatcher. With the added graph context it's correctly
+identified as a logging function.
+
+Orange arrow - sub_140012B6C is incorrectly stated to branch to the resolved address. With context it's identified as
+installing a hook (it patches the address of the ntdll syscall into a syscall wrapper)
+
+Yellow circle - with context the check is correctly identified as looking for the standard syscall setup on windows
+
+Red circles - fully hallucinated
 
 
-## Dependencies
+## Core Workflow
 
+1.  **Extract CFG**: Extract the CFG and basic block instructions from an IDA database (.idb or .i64).
+2.  **Pre-process**: Import the JSON data into a graph representation for pruning and normalization.
+3.  **Summarize**: Generate function summaries by recursively incorporating information from connected nodes (called/referenced functions).
+4.  **Condense**: Generate concise titles, one-liners, and "suspiciousness" scores from the full summaries.
+5.  **Annotate**: Push the generated titles and summaries back into the IDA database as function names and comments.
+
+## Setup
+
+- Install dependencies via uv 
 - IDA Pro (9.0+ for standalone extraction) with IDAPYTHON support.
-- Python 3.14+
-- `idapro` (for standalone extraction)
-- `ipysigma`
-- `networkx`
-- `pandas`
-- `matplotlib`
-- `pydot` (optional, for DOT export)
+- LLM configuration (API keys, endpoint, model selection) is handled via `src/llm_interface.py` or overridden by environment variables
 
 
 ## Project Structure
 
 - `src/extract_cfg.py`: IDA Python script to be run inside IDA Pro.
 - `src/extract_cfg_standalone.py`: Standalone Python script for direct database extraction.
-- `src/visualize_cfg.py`: Python script to prepare CFG data for visualization.
-- `pyproject.toml` / `requirements.txt`: Project dependencies (now using `ipysigma`).
-- `sample.ipynb`: Jupyter Notebook for interactive visualization with `ipysigma`.
+- `src/summarize_graph.py`: Recursively summarizes functions using LLMs, incorporating context from dependencies.
+- `src/name_and_condense.py`: Generates short titles and one-line summaries from full function descriptions.
+- `src/annotate_ida_db.py`: IDA Python script to apply annotations back to the IDB.
+- `src/visualize_cfg.py`: Utilities for graph loading, pruning (collapsing chains/thunks), and visualization preparation.
+- `notebooks/`: Jupyter notebooks for interactive graph exploration and visualization with `ipysigma`.
 
 ## Usage
 
 ### 1. Extract CFG from IDA
 
-If you have IDA Pro 9.0 or later and the `idapro` package installed, you can extract directly from a database file on disk without launching IDA:
+You can extract the CFG directly from a database file on disk:
 
-1. **Install the `idapro` library**:
-   ```bash
-   python3 -m pip install idapro
-   ```
-2. **Configure IDA Pro path**:
-   The `idapro` library needs to know where your IDA Pro installation is. You can configure this by editing `~/.idapro/ida-config.json` (created automatically on first run) or by setting the `IDA_INSTALL_DIR` environment variable.
-   
-   Example `~/.idapro/ida-config.json`:
-   ```json
-   {
-       "Paths": {
-           "ida-install-dir": "/Applications/IDA Pro 9.0.app/Contents/MacOS"
-       }
-   }
-   ```
-3. **Run the extraction**:
-   ```bash
-   python3 -m src.extract_cfg_standalone your_database.i64
-   ```
-*Note: This requires a valid IDA license and the `idapro` package configured.*
-
-This will generate a `your_database_cfg.json` file in the same directory.
-
-### 2. Visualize CFG
-
-Run the visualization script:
 ```bash
-python3 -m src.visualize_cfg your_database_cfg.json
+python3 -m src.extract_cfg_standalone your_database.i64
+```
+*Note: Requires `idapro` package and valid IDA license.*
+
+This generates `your_database_cfg.json`.
+
+### 2. Summarize Graph
+
+Generate recursive summaries for all functions in the graph. This step uses an LLM to understand function behavior based on its instructions and the summaries of functions it calls.
+This produces a `.jsonl` file (e.g., `function_summaries.jsonl`) containing name/summary pairs.
+```bash
+python3 -m src.summarize_graph
 ```
 
-### 3. Function Annotations in IDA Pro GUI
+### 3. Generate Titles and One-liners
 
-Once the summaries and function names are extracted into the correct JSON schema, they can be directly annotated as comments in an IDA database.
+Condense the full summaries into human-readable titles and short descriptions.
 
-**Usage:**
-1. With an IDA project open, go to File -> Script file... and select `annotate_ida_db.py`. This will load the script into IDA's Pytohn environment.
-
-2. In the Python console at the bottom, call the function annotate_all(). This will prompt you for two JSON/JSONL files. The first contains the full function summaries following the schema:
+```bash
+python3 -m src.name_and_condense
 ```
-{<function_name>: <function_description>, 
-...
-}
-```
+This produces a `.jsonl` file (e.g., `function_titles.jsonl`) containing the original name, new title, and a one-line summary.
 
-and the second contains the original function name, the updated LLM-generated name, and a short one-line description to use at function calls. This JSONL follows the schema:
+### 4. Annotate IDA Database
 
-```
-{"original_name": <original function name>, 
-"title": <new function name>, 
-"one_line_summary": <one-line summary>},
+Load the results back into IDA Pro to assist your analysis.
 
-...
+1.  Open your database in IDA Pro.
+2.  Go to **File -> Script file...** and select `src/annotate_ida_db.py`.
+3.  In the IDA Python console, run:
+    ```python
+    annotate_all()
+    ```
+4.  Follow the prompts to select your full summaries JSON and the titles JSONL file.
 
-```
-
-TODO: Use a single json file and schema for both eventually.
+This will:
+- Rename functions based on the generated titles.
+- Add full summaries as function comments.
+- Add one-liners as comments at call sites.
