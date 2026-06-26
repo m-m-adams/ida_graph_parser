@@ -2,7 +2,6 @@ import asyncio
 import os
 import time
 from typing import Optional
-
 from openai import AsyncOpenAI
 
 DEFAULT_MODEL = "qwen3-coder-next"
@@ -56,3 +55,45 @@ class LLMInterface:
             finally:
                 elapsed = time.perf_counter() - start
                 self._active_requests -= 1
+
+def get_summary(system:str, text: str) -> str:
+    """Call the LLM to get a summary of the given text."""
+    llm_interface = LLMInterface(
+        api_key="",
+        base_url="http://192.168.1.101:8000/v1",
+        model=DEFAULT_MODEL,
+        max_concurrent=10,
+    )
+    return asyncio.run(llm_interface.call_llm(system=system, user=text))
+
+def naive_summarizer():
+    import ida_domain
+    FUNC_SYSTEM_PROMPT = (
+        "You are a reverse-engineering assistant. "
+        "You are given a single function's aarch64 assembly. "
+        "Summarize what this function does. Be concise. "
+        "Your audience is an expert reverse engineer. "
+        "If a function follows standard ABI calling conventions don't reexplain them."
+    )
+
+    db_path = "/Users/mark/windows_share/test/reorder_and_pad.exe.i64"
+    with ida_domain.Database.open(db_path, save_on_close=False) as db:
+        main_func = db.functions.get_by_name("sub_140001234")
+        instrs = [db.instructions.get_disassembly(instr) for instr in db.functions.get_instructions(main_func)]
+        text = "\n".join(instrs)
+        print(get_summary(FUNC_SYSTEM_PROMPT, text))
+
+
+if __name__ == "__main__":
+    SYSTEM_PROMPT = """
+    You are a reverse-engineering assistant. 
+    You are given a list of functions and their summaries.
+    You're job is to accurately describe the overall behaviour of the program.
+    Focus on the execution path - the entrypoint is ExReleaseFastMutexUnsafeAndLeaveCriticalRegion
+    and the user main function is windows::main(). Your summary should be based on what happens when the
+    program is run. 
+    """
+    with open("../data/function_summaries.jsonl", "r") as f:
+        summaries = f.read()
+    print(get_summary(SYSTEM_PROMPT, summaries))
+
