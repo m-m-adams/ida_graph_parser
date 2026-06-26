@@ -21,10 +21,8 @@ from typing import Optional
 import networkx as nx
 from tqdm import tqdm
 
-import llm_interface
-from extract_cfg import extract_cfg_from_db
-from llm_interface import LLMInterface
-from visualize_cfg import load_cfg, prune_graph
+import src.llm_interface as llm_interface
+from src.llm_interface import LLMInterface
 
 logger = logging.getLogger(__name__)
 
